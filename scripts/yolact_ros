@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 import roslib
 roslib.load_manifest('yolact_ros')
 import sys
@@ -39,6 +39,14 @@ from rospy.numpy_msg import numpy_msg
 from dynamic_reconfigure.server import Server as ReconfigureServer
 from yolact_ros.cfg import YolactConfig
 
+#MaskRCNN msg
+from mask_rcnn_ros.msg import Result
+from sensor_msgs.msg import Image
+from sensor_msgs.msg import RegionOfInterest
+import std_msgs.msg
+
+
+
 iou_thresholds = [x / 100 for x in range(50, 100, 5)]
 coco_cats = {} # Call prep_coco_cats to fill this
 coco_cats_inv = {}
@@ -78,8 +86,9 @@ class YolactNode:
 
     self.image_pub = rospy.Publisher("~visualization", Image, queue_size=1)
 
-    self.detections_pub = rospy.Publisher("~detections", Detections, queue_size=1)
-
+    #self.detections_pub = rospy.Publisher("~detections", Detections, queue_size=1)
+    self.detections_pub = rospy.Publisher("/instance_mask/result", Result, queue_size=1)
+    
     self.bridge = CvBridge()
 
     self.processing_queue = SynchronizedObject()
@@ -106,7 +115,7 @@ class YolactNode:
     self.display_fps = False
     self.score_threshold = 0.0
     self.crop_masks = True
-    self.top_k = 5
+    self.top_k = 10
 
     self.image_sub = None # subscriber is created in dynamic_reconfigure callback
 
@@ -227,7 +236,6 @@ class YolactNode:
           font_thickness = 1
 
           text_w, text_h = cv2.getTextSize(fps_str, font_face, font_scale, font_thickness)[0]
-
           img_gpu[0:text_h+8, 0:text_w+8] *= 0.6 # 1 - Box alpha
 
 
@@ -273,32 +281,73 @@ class YolactNode:
 
       return img_numpy
 
+
   def generate_detections_msg(self, classes, scores, boxes, masks, image_header):
-    dets_msg = Detections()
+    # dets_msg = Detections()
+    # for detnum in range(len(classes)):
+    #   det = Detection()
+    #   det.class_name = cfg.dataset.class_names[classes[detnum]]
+    #   det.score = float(scores[detnum])
+    #   x1, y1, x2, y2 = boxes[detnum]
+    #   det.box.x1 = int(x1)
+    #   det.box.y1 = int(y1)
+    #   det.box.x2 = int(x2)
+    #   det.box.y2 = int(y2)
+    #   mask = masks[detnum,y1:y2,x1:x2]
+    #   det.mask.mask = np.packbits(mask.bool().cpu()).tolist()
+    #   det.mask.height = int(y2 - y1)
+    #   det.mask.width = int(x2 - x1)
+    #   dets_msg.detections.append(det)
+
+    #   #encoding_correct = True
+    #   #for x in range(det.mask.width):
+    #   #    for y in range(det.mask.height):
+    #   #        if bool(masks[detnum,y1+y,x1+x]) != mask_utils.test(det.mask, x, y):
+    #   #            encoding_correct = False
+    #   #print('Encoding correct: ' + str(encoding_correct))
+
+    # dets_msg.header = image_header
+    # return dets_msg
+    
+    result_msg = Result()   #TODO: import Result msg so MaskRCNN pkg is not needed
+    result_msg.header = self.msg.header
+
     for detnum in range(len(classes)):
-      det = Detection()
-      det.class_name = cfg.dataset.class_names[classes[detnum]]
-      det.score = float(scores[detnum])
-      x1, y1, x2, y2 = boxes[detnum]
-      det.box.x1 = int(x1)
-      det.box.y1 = int(y1)
-      det.box.x2 = int(x2)
-      det.box.y2 = int(y2)
-      mask = masks[detnum,y1:y2,x1:x2]
-      det.mask.mask = np.packbits(mask.bool().cpu()).tolist()
-      det.mask.height = int(y2 - y1)
-      det.mask.width = int(x2 - x1)
-      dets_msg.detections.append(det)
+        box = RegionOfInterest()
+        x1, y1, x2, y2 = boxes[detnum]
 
-      #encoding_correct = True
-      #for x in range(det.mask.width):
-      #    for y in range(det.mask.height):
-      #        if bool(masks[detnum,y1+y,x1+x]) != mask_utils.test(det.mask, x, y):
-      #            encoding_correct = False
-      #print('Encoding correct: ' + str(encoding_correct))
+        box.x_offset = int(x1)
+        box.y_offset = int(y1)
+        box.height = int(y2 - y1)
+        box.width = int(x2 - x1)
+        result_msg.boxes.append(box)
 
-    dets_msg.header = image_header
-    return dets_msg
+        class_id = classes[detnum] + 1 #background correction, +2?
+        result_msg.class_ids.append(int(class_id))
+
+        class_name = cfg.dataset.class_names[classes[detnum]]
+        result_msg.class_names.append(class_name)
+
+        score = float(scores[detnum])
+        result_msg.scores.append(score)
+
+        mask = Image()
+        mask.header = result_msg.header
+        
+        mask.height = masks.shape[1]
+        mask.width = masks.shape[2]
+        mask.encoding = "mono8" 
+        mask.is_bigendian = 0
+        mask.step = mask.width
+        #mask.data = (result['masks'][:, :, i] * 255).tobytes()
+        yol_mask = masks[detnum,:,:]
+        #map to bytes and make into single dim list
+        x = list(np.uint8((yol_mask.bool().cpu().numpy() * np.uint8(255)).ravel()))
+        mask.data = x
+        result_msg.masks.append(mask)
+        
+        print("class_id", class_id, "class_name", class_name)
+    return result_msg
 
   def evalimage(self, cv_image, image_header):
     with torch.no_grad():
@@ -334,6 +383,7 @@ class YolactNode:
           print(e)
 
   def callback(self, data):
+    self.msg = data
     try:
       if self.use_compressed_image:
           np_arr = np.fromstring(data.data, np.uint8)
