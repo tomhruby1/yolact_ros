@@ -1,6 +1,6 @@
 # yolact_ros
 
-ROS wrapper for Yolact.
+Slightly edited ROS wrapper for Yolact, chainging output to mask_rcnn_ros (https://github.com/akio/mask_rcnn_ros) rosmsg format. Used as substitude to Mask R-CNN in Voxblox++ system.
 
 ## Related packages
 
